@@ -10,7 +10,8 @@
     "preview": "vite preview --host 0.0.0.0",
     "test": "playwright test",
     "format": "prettier --write .",
-    "build:pages": "npm run build:offline && node scripts/build-pages.mjs"
+    "build:pages": "npm run build:offline && node scripts/build-pages.mjs",
+    "test:pages": "node scripts/verify-pages.mjs"
   },
   "dependencies": {
     "lucide-react": "1.57.0",

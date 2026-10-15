@@ -11,7 +11,7 @@ npm ci
 npm run dev
 ```
 
-开发服务默认使用 5173 端口。生产构建与本地预览：
+开发服务默认使用 5173 端口，HTML 开发入口是 `src/index.html`。仓库根目录的 `index.html` 是生成后的发布文件，请勿手工修改。生产构建与本地预览：
 
 ```bash
 npm run build
@@ -74,13 +74,15 @@ npm run build:offline
 npm run build:pages
 ```
 
-命令先构建自包含网页，再将发布文件写入 `docs/index.html`，同时创建 `docs/.nojekyll`。发布网页不依赖根目录资源路径，可直接托管在 `/Wenzo_App/` 等子路径。将源码和 `docs` 一并提交推送后，在仓库设置中进行一次配置：
+命令先构建自包含网页，再将同一份发布页面写入根目录 `index.html` 与 `docs/index.html`，同时在两处创建 `.nojekyll`。两个发布目录都无需开发服务器、不依赖根目录资源路径，可直接托管在 `/Wenzo_App/` 等子路径。将源码和生成页面一并提交推送后，在仓库设置中进行一次配置：
 
 1. 打开 <https://github.com/Wenzo-zwz/Wenzo_App/settings/pages>。
 2. 在 **Build and deployment** 中，将 **Source** 设为 **Deploy from a branch**。
-3. 将 **Branch** 设为 **main**，目录设为 **/docs**，点击 **Save**。
+3. 将 **Branch** 设为 **main**，目录可选 **/docs** 或 **/ (root)**，点击 **Save**。
 4. 等待 GitHub 的 Pages 部署完成，再使用设置页显示的 **Visit site**。
 
 首次启用后，默认站点地址应为 <https://wenzo-zwz.github.io/Wenzo_App/>。只有 Pages 部署成功后该地址才可访问；构建成功或推送代码不等于站点已上线。
 
-后续更新页面时，重新执行 `npm run build:pages`，将变更后的 `docs` 一并提交推送即可更新网站。
+发布前执行 `npm run test:pages`，它会通过真实 HTTP 子路径验证根目录和 `/docs` 的发布页面，检查 12 种工具、手机布局、浏览器错误及资源加载。
+
+后续更新页面时，重新执行 `npm run build:pages`，将根目录 `index.html` 和变更后的 `docs` 一并提交推送即可更新网站。
