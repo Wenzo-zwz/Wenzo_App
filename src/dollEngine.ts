@@ -1,3 +1,7 @@
+import { getToolProgress } from './progression';
+import type { ToolProgress } from './progression';
+import { drawToyDecorations, getToyPose } from './toyEvolution';
+
 export type ToolId =
   | 'punch'
   | 'slap'
@@ -81,6 +85,10 @@ export class DollEngine {
   private height = 1;
   private scale = 1;
   private style: DollStyle = 'lavender';
+  private activeTool: ToolId = 'punch';
+  private counts: Partial<Record<ToolId, number>> = {};
+  private progress = getToolProgress('punch', 0);
+  private flightStarted: number | null = null;
   private face: HTMLCanvasElement | null = null;
   private particles: Particle[] = [];
   private bursts: Burst[] = [];
@@ -128,8 +136,25 @@ export class DollEngine {
     this.face = image;
   }
 
-  hit(tool: ToolId, intensity: number, x?: number, y?: number) {
+  setActiveTool(tool: ToolId) {
+    if (this.activeTool !== tool) this.clearTransients();
+    this.activeTool = tool;
+    this.progress = getToolProgress(tool, this.counts[tool] ?? 0);
+  }
+
+  hit(tool: ToolId, intensity: number, x?: number, y?: number): ToolProgress | undefined {
     if (this.destroyed) return;
+    this.setActiveTool(tool);
+    const count = (this.counts[tool] ?? 0) + 1;
+    this.counts[tool] = count;
+    this.progress = getToolProgress(tool, count);
+    if (
+      tool === 'tornado' &&
+      this.progress.stage === 4 &&
+      (this.flightStarted === null || this.elapsed - this.flightStarted > 2300)
+    ) {
+      this.flightStarted = this.elapsed;
+    }
     const normalized = Number.isFinite(intensity) ? intensity / 100 : 0.5;
     const strength = 0.55 + clamp(normalized, 0, 1) * 1.15;
     const hitX = x ?? this.width / 2;
@@ -159,13 +184,25 @@ export class DollEngine {
     this.bursts = this.bursts.slice(-5);
     this.emitParticles(tool, hitX, hitY, strength);
     this.onImpact?.();
+    return this.progress;
   }
 
   reset() {
+    this.restore();
+  }
+
+  restore() {
+    this.counts = {};
+    this.progress = getToolProgress(this.activeTool, 0);
+    this.clearTransients();
+  }
+
+  private clearTransients() {
     this.x = this.y = this.vx = this.vy = this.rotation = this.rotationVelocity = this.squash = 0;
     this.particles = [];
     this.bursts = [];
     this.expressionUntil = 0;
+    this.flightStarted = null;
   }
 
   destroy() {
@@ -248,20 +285,503 @@ export class DollEngine {
     c.fill();
     c.restore();
 
+    const pose = this.getPose();
     c.save();
-    c.translate(centerX + this.x, centerY + this.y + breathe);
+    c.translate(centerX, centerY);
     c.scale(this.scale, this.scale);
-    c.rotate(clamp(this.rotation, -0.7, 0.7));
-    c.scale(1 + this.squash, 1 - this.squash * 0.8);
+    this.drawEnvironment(false);
+    c.save();
+    c.translate(this.x / this.scale + pose.offsetX, (this.y + breathe) / this.scale + pose.offsetY);
+    c.rotate(clamp(this.rotation, -0.7, 0.7) + pose.rotation);
+    c.scale((1 + this.squash) * pose.scaleX, (1 - this.squash * 0.8) * pose.scaleY);
     this.drawDoll();
+    this.drawCoreToyDetails();
+    drawToyDecorations(
+      c,
+      this.activeTool,
+      this.progress,
+      this.elapsed,
+      this.reducedMotion,
+      !!this.face,
+    );
+    c.restore();
+    this.drawEnvironment(true);
     c.restore();
     this.drawEffects();
     this.drawParticles();
     this.drawComicText();
   }
 
+  private getPose() {
+    const pose = getToyPose(this.activeTool, this.progress, this.elapsed, this.reducedMotion);
+    const stage = this.progress.stage;
+    if (!stage) return pose;
+    if (this.activeTool === 'ice' && !this.reducedMotion) {
+      pose.offsetX += Math.sin(this.elapsed / 35) * (stage === 4 ? 0.45 : 1.8);
+      pose.rotation += Math.sin(this.elapsed / 43) * 0.012;
+    }
+    if (this.activeTool === 'fire' && stage < 4 && !this.reducedMotion) {
+      pose.offsetY += Math.sin(this.elapsed / 145) * stage * 0.7;
+    }
+    if (this.activeTool === 'tornado') {
+      if (!this.reducedMotion) {
+        pose.offsetX += Math.sin(this.elapsed / (stage === 1 ? 360 : 290)) * (stage === 1 ? 9 : 16);
+        pose.rotation +=
+          stage < 3
+            ? Math.sin(this.elapsed / 370) * stage * 0.08
+            : this.elapsed / (stage === 3 ? 750 : 920);
+      } else if (stage >= 3) pose.rotation += stage === 4 ? 0.3 : -0.18;
+      if (stage >= 2)
+        pose.offsetY -= 18 + (this.reducedMotion ? 0 : Math.sin(this.elapsed / 270) * 7);
+      if (stage >= 3) {
+        pose.scaleX *= 0.77;
+        pose.scaleY *= 0.77;
+        pose.offsetY -= 10;
+      }
+      if (stage === 4 && this.flightStarted !== null && !this.reducedMotion) {
+        const flight = (this.elapsed - this.flightStarted) / 2300;
+        if (flight < 1) {
+          const ascent = flight < 0.46;
+          const phase = ascent ? flight / 0.46 : (flight - 0.46) / 0.54;
+          const eased = Math.sin((phase * Math.PI) / 2);
+          const size = ascent ? 1 - eased * 0.88 : 0.12 + eased * 0.88;
+          pose.scaleX *= size;
+          pose.scaleY *= size;
+          pose.offsetY -= ascent ? eased * 155 : (1 - eased) * 155;
+          pose.rotation += flight * Math.PI * 8;
+        }
+      }
+    }
+    return pose;
+  }
+
+  private drawEnvironment(front: boolean) {
+    const stage = this.progress.stage;
+    if (!stage) return;
+    const c = this.ctx;
+    const time = this.reducedMotion ? 0 : this.elapsed;
+    c.save();
+    c.lineCap = 'round';
+    c.lineJoin = 'round';
+    if (this.activeTool === 'fire') {
+      if (!front) {
+        const warmth = c.createRadialGradient(0, 110, 20, 0, 110, 170);
+        warmth.addColorStop(0, '#f1b46635');
+        warmth.addColorStop(1, '#f1b46600');
+        this.ellipse(0, 105, 165, 139, warmth);
+        if (stage >= 2) {
+          for (let i = 0; i < 11; i++) {
+            const phase = (time / 2900 + i / 11) % 1;
+            const x = Math.sin(i * 2.4 + phase * 3) * (27 + phase * 22);
+            const y = -116 - phase * 103;
+            c.globalAlpha = (1 - phase) * (stage >= 3 ? 0.37 : 0.2);
+            this.ellipse(x, y, 9 + phase * 19, 7 + phase * 14, '#77717d');
+            this.ellipse(x + 11, y + 3, 8 + phase * 13, 7 + phase * 11, '#88818a');
+          }
+          c.globalAlpha = 1;
+        }
+      } else {
+        const number = stage === 1 ? 3 : stage === 2 ? 5 : 7;
+        for (let i = 0; i < number; i++) {
+          const x = (i - (number - 1) / 2) * (stage === 1 ? 36 : 31);
+          const sway = Math.sin(time / 230 + i * 2) * 5;
+          const height = (stage === 1 ? 29 : stage === 2 ? 43 : 52) + Math.sin(time / 170 + i) * 7;
+          this.drawFlame(x, 191 - Math.abs(x) * 0.1, height, sway, i % 2 === 0);
+        }
+        if (stage === 4) {
+          for (let i = 0; i < 8; i++) {
+            c.globalAlpha = 0.4;
+            this.ellipse(
+              Math.sin(i * 6.7) * 88,
+              196 + Math.cos(i * 3) * 8,
+              3 + (i % 3),
+              2,
+              '#67606d',
+            );
+          }
+        }
+      }
+    }
+    if (this.activeTool === 'ice') {
+      if (!front) {
+        const chill = c.createRadialGradient(0, 20, 25, 0, 20, 220);
+        chill.addColorStop(0, '#9fd9ed25');
+        chill.addColorStop(1, '#bce9f100');
+        this.ellipse(0, 5, 190, 218, chill);
+        for (let i = 0; i < 16 + stage * 5; i++) {
+          const x = Math.sin(i * 17.91) * 162 + Math.sin(time / 1400 + i) * 6;
+          const y = ((i * 61.7 + time / (31 - stage * 3)) % 438) - 223;
+          c.globalAlpha = 0.42 + (i % 3) * 0.17;
+          this.drawSnowflake(x, y, 2.6 + (i % 4), '#8fbdcf');
+        }
+        c.globalAlpha = 1;
+        if (stage === 4) {
+          const glass = c.createLinearGradient(-135, -200, 140, 205);
+          glass.addColorStop(0, '#e2faff65');
+          glass.addColorStop(0.55, '#8dccdf1c');
+          glass.addColorStop(1, '#b4e9f366');
+          this.roundRect(-135, -207, 261, 408, 13);
+          c.fillStyle = glass;
+          c.fill();
+        }
+      } else if (stage === 4) this.drawIceBlock();
+    }
+    if (this.activeTool === 'tornado') {
+      if (stage >= 3) {
+        if (!front) {
+          const funnel = c.createLinearGradient(-155, 0, 155, 0);
+          funnel.addColorStop(0, '#b9aaca30');
+          funnel.addColorStop(0.5, '#e9e1f13d');
+          funnel.addColorStop(1, '#a89bc249');
+          c.beginPath();
+          c.moveTo(-154, -202);
+          c.bezierCurveTo(-118, -61, -38, 51, -13, 187);
+          c.quadraticCurveTo(0, 203, 15, 187);
+          c.bezierCurveTo(44, 49, 116, -62, 154, -202);
+          c.quadraticCurveTo(0, -228, -154, -202);
+          c.fillStyle = funnel;
+          c.fill();
+        }
+        for (let i = 0; i < 11; i++) {
+          const y = -204 + i * 38;
+          const radius = 151 - i * 13.2;
+          const drift = Math.sin(time / 400 + i * 0.9) * 6;
+          c.strokeStyle = front ? '#9e90b77c' : '#c3b5d363';
+          c.lineWidth = front ? 2.5 : 1.8;
+          c.beginPath();
+          c.ellipse(
+            drift,
+            y,
+            radius,
+            12 + radius * 0.06,
+            -0.04,
+            front ? 0 : Math.PI,
+            front ? Math.PI : Math.PI * 2,
+          );
+          c.stroke();
+          const angle = time / 470 + i * 1.9;
+          const isFront = Math.sin(angle) > 0;
+          if (isFront === front) {
+            c.save();
+            c.translate(
+              Math.cos(angle) * radius + drift,
+              y + Math.sin(angle) * (12 + radius * 0.06),
+            );
+            c.rotate(angle);
+            this.ellipse(0, 0, 5, 2, i % 2 ? '#b9c7a2' : '#c2a1bd');
+            c.restore();
+          }
+        }
+      } else {
+        for (let i = 0; i < 5; i++) {
+          const phase = (time / 2000 + i / 5) % 1;
+          const x = -166 + phase * 332;
+          const y = -131 + i * 67;
+          c.strokeStyle = front ? '#af9dc13d' : '#a695bd70';
+          c.lineWidth = 2;
+          c.beginPath();
+          c.moveTo(x - 23, y);
+          c.bezierCurveTo(x, y - 10, x + 32, y + 7, x + 53, y - 4);
+          c.stroke();
+        }
+        if (stage === 2 && front) {
+          c.setLineDash([7, 12]);
+          c.strokeStyle = '#ab97c470';
+          c.lineWidth = 2;
+          c.beginPath();
+          c.ellipse(0, 186, 101, 20, -0.08, 0, Math.PI * 2);
+          c.stroke();
+        }
+      }
+    }
+    c.restore();
+  }
+
+  private drawFlame(x: number, y: number, height: number, sway: number, amber: boolean) {
+    const c = this.ctx;
+    c.save();
+    c.translate(x, y);
+    const gradient = c.createLinearGradient(0, -height, 0, 7);
+    gradient.addColorStop(0, '#f2ac76');
+    gradient.addColorStop(0.55, amber ? '#f2bd69' : '#ee9e73');
+    gradient.addColorStop(1, '#f5d7a000');
+    c.beginPath();
+    c.moveTo(-15, 0);
+    c.bezierCurveTo(-28, -height * 0.35, -2 + sway, -height * 0.6, sway, -height);
+    c.bezierCurveTo(19 + sway, -height * 0.57, 25, -height * 0.25, 13, 0);
+    c.quadraticCurveTo(0, 12, -15, 0);
+    c.fillStyle = gradient;
+    c.fill();
+    c.beginPath();
+    c.moveTo(-7, -1);
+    c.quadraticCurveTo(-13, -height * 0.23, sway, -height * 0.56);
+    c.quadraticCurveTo(13, -height * 0.14, 6, -1);
+    c.fillStyle = '#fff0b5bb';
+    c.fill();
+    c.restore();
+  }
+
+  private drawIceBlock() {
+    const c = this.ctx;
+    const sheen = c.createLinearGradient(-135, -200, 125, 200);
+    sheen.addColorStop(0, '#eafcff3d');
+    sheen.addColorStop(0.4, '#c6eff523');
+    sheen.addColorStop(1, '#93d0e344');
+    this.roundRect(-135, -207, 261, 408, 13);
+    c.fillStyle = sheen;
+    c.fill();
+    c.strokeStyle = '#8ab8cc';
+    c.lineWidth = 2.1;
+    c.stroke();
+    c.beginPath();
+    c.moveTo(-124, -207);
+    c.lineTo(-103, -225);
+    c.lineTo(142, -225);
+    c.lineTo(126, -207);
+    c.closePath();
+    c.fillStyle = '#e5f9ff99';
+    c.fill();
+    c.strokeStyle = '#9ccadd';
+    c.stroke();
+    c.beginPath();
+    c.moveTo(126, -197);
+    c.lineTo(145, -215);
+    c.lineTo(145, 181);
+    c.lineTo(126, 199);
+    c.closePath();
+    c.fillStyle = '#a4d8e76b';
+    c.fill();
+    c.strokeStyle = '#8cbdd1';
+    c.stroke();
+    c.save();
+    this.roundRect(-133, -205, 257, 404, 12);
+    c.clip();
+    c.fillStyle = '#ffffff38';
+    c.beginPath();
+    c.moveTo(-123, -207);
+    c.lineTo(-75, -207);
+    c.lineTo(-135, -21);
+    c.lineTo(-135, -130);
+    c.closePath();
+    c.fill();
+    c.beginPath();
+    c.moveTo(126, -89);
+    c.lineTo(126, -41);
+    c.lineTo(16, 200);
+    c.lineTo(-10, 200);
+    c.closePath();
+    c.fill();
+    c.fillStyle = '#ffffff25';
+    c.beginPath();
+    c.moveTo(-135, 155);
+    c.lineTo(36, 91);
+    c.lineTo(126, 200);
+    c.lineTo(-135, 200);
+    c.closePath();
+    c.fill();
+    c.strokeStyle = '#ffffffa8';
+    c.lineWidth = 2.1;
+    c.beginPath();
+    c.moveTo(-125, -174);
+    c.lineTo(-125, -112);
+    c.moveTo(-125, -99);
+    c.lineTo(-125, -82);
+    c.moveTo(116, 103);
+    c.lineTo(116, 178);
+    c.stroke();
+    for (const [x, y, size] of [
+      [-106, -178, 13],
+      [96, -143, 18],
+      [-103, 124, 15],
+      [83, 166, 12],
+    ])
+      this.drawSnowflake(x, y, size, '#ffffffaa');
+    c.restore();
+    c.fillStyle = '#e8fbff';
+    c.strokeStyle = '#99c6d7';
+    c.lineWidth = 1;
+    for (const [x, y] of [
+      [-132, 177],
+      [-119, 197],
+      [118, -202],
+      [139, 179],
+    ]) {
+      c.beginPath();
+      c.moveTo(x - 6, y + 7);
+      c.lineTo(x - 1, y - 11);
+      c.lineTo(x + 8, y + 3);
+      c.closePath();
+      c.fill();
+      c.stroke();
+    }
+  }
+
+  private drawSnowflake(x: number, y: number, size: number, color: string) {
+    const c = this.ctx;
+    c.save();
+    c.translate(x, y);
+    c.strokeStyle = color;
+    c.lineWidth = size > 9 ? 1.7 : 1.1;
+    for (let i = 0; i < 3; i++) {
+      c.rotate(Math.PI / 3);
+      c.beginPath();
+      c.moveTo(-size, 0);
+      c.lineTo(size, 0);
+      c.stroke();
+      if (size > 9) {
+        c.beginPath();
+        c.moveTo(size * 0.5, -size * 0.26);
+        c.lineTo(size * 0.68, 0);
+        c.lineTo(size * 0.5, size * 0.26);
+        c.moveTo(-size * 0.5, -size * 0.26);
+        c.lineTo(-size * 0.68, 0);
+        c.lineTo(-size * 0.5, size * 0.26);
+        c.stroke();
+      }
+    }
+    c.restore();
+  }
+
+  private drawCoreToyDetails() {
+    const c = this.ctx;
+    const stage = this.progress.stage;
+    if (!stage) return;
+    c.save();
+    if (this.activeTool === 'fire' && stage >= 3) {
+      for (const [x, y, rx, ry, rotation] of [
+        [-61, -152, 21, 13, -0.5],
+        [47, -81, 25, 14, -0.3],
+        [-42, 51, 23, 17, 0.3],
+        [45, 117, 20, 11, -0.3],
+        [-52, 164, 17, 9, 0.2],
+      ]) {
+        const soot = c.createRadialGradient(x, y, 1, x, y, rx);
+        soot.addColorStop(0, stage === 4 ? '#211f2988' : '#50424ed9');
+        soot.addColorStop(0.67, '#50424e8c');
+        soot.addColorStop(1, '#50424e00');
+        this.ellipse(x, y, rx * 1.3, ry * 1.3, soot, rotation);
+      }
+      if (stage === 3) {
+        this.ellipse(-39, -101, 10, 6, '#55434e88', -0.12);
+        this.ellipse(39, -101, 10, 6, '#55434e88', 0.12);
+      }
+    }
+    if (this.activeTool === 'ice') {
+      if (stage >= 2) {
+        this.ellipse(-39, -106, 12, 7, '#e999a1a0', -0.1);
+        this.ellipse(39, -106, 12, 7, '#e999a1a0', 0.1);
+        const size = 11 + (this.reducedMotion ? 1 : Math.sin(this.elapsed / 450) * 2);
+        const bubble = c.createRadialGradient(7, -88, 1, 12, -83, size + 4);
+        bubble.addColorStop(0, '#f4fdff96');
+        bubble.addColorStop(0.7, '#a7dce663');
+        bubble.addColorStop(1, '#b9e9ed88');
+        this.ellipse(11, -85, size, size * 1.14, bubble, 0.15, '#81b7cd');
+        this.ellipse(7, -90, 2.3, 3.6, '#ffffffc9', 0.4);
+        c.strokeStyle = '#8ab3c8';
+        c.lineWidth = 1.5;
+        c.beginPath();
+        c.moveTo(4, -105);
+        c.quadraticCurveTo(12, -102, 12, -98);
+        c.stroke();
+      }
+      if (stage >= 3) {
+        c.save();
+        c.beginPath();
+        c.moveTo(-84, 51);
+        c.lineTo(-63, 76);
+        c.lineTo(-50, 48);
+        c.lineTo(-31, 73);
+        c.lineTo(-10, 42);
+        c.lineTo(8, 68);
+        c.lineTo(30, 40);
+        c.lineTo(46, 73);
+        c.lineTo(70, 46);
+        c.lineTo(89, 86);
+        c.quadraticCurveTo(87, 148, 62, 173);
+        c.lineTo(74, 181);
+        c.quadraticCurveTo(56, 205, 24, 187);
+        c.lineTo(0, 166);
+        c.lineTo(-25, 188);
+        c.quadraticCurveTo(-66, 206, -80, 178);
+        c.lineTo(-61, 165);
+        c.quadraticCurveTo(-89, 121, -84, 51);
+        c.closePath();
+        const frost = c.createLinearGradient(0, 43, 0, 195);
+        frost.addColorStop(0, '#d6f3fa6b');
+        frost.addColorStop(1, '#b7deefcf');
+        c.fillStyle = frost;
+        c.fill();
+        c.clip();
+        for (let i = 0; i < 13; i++)
+          this.drawSnowflake(
+            Math.sin(i * 17.1) * 69,
+            73 + ((i * 29) % 117),
+            5 + (i % 5),
+            '#ffffffe0',
+          );
+        c.restore();
+        c.globalAlpha = 0.5;
+        for (let i = 0; i < 3; i++) {
+          const phase = this.reducedMotion ? i / 3 : (this.elapsed / 1900 + i / 3) % 1;
+          this.ellipse(54 + phase * 46, -89 - phase * 14, 7 + phase * 10, 4 + phase * 5, '#f4fdff');
+        }
+      }
+      c.strokeStyle = '#82adc47d';
+      c.lineWidth = 1.7;
+      for (const direction of [-1, 1]) {
+        c.beginPath();
+        c.moveTo(direction * 103, -34);
+        c.lineTo(direction * 108, -25);
+        c.lineTo(direction * 103, -16);
+        c.lineTo(direction * 108, -7);
+        c.stroke();
+        c.beginPath();
+        c.moveTo(direction * 97, 54);
+        c.lineTo(direction * 102, 64);
+        c.lineTo(direction * 97, 74);
+        c.stroke();
+      }
+    }
+    c.restore();
+  }
+
+  private drawCharcoalFace() {
+    const c = this.ctx;
+    for (const direction of [-1, 1]) {
+      this.ellipse(direction * 24, -119, 10, 13, '#fffdf1', direction * 0.05);
+      this.ellipse(direction * 24 + 2, -118, 3.5, 5, '#45404f');
+    }
+    c.strokeStyle = '#fff7e5';
+    c.lineWidth = 2.7;
+    c.beginPath();
+    c.moveTo(-9, -93);
+    c.quadraticCurveTo(0, -86, 9, -94);
+    c.stroke();
+    c.strokeStyle = '#cac0cf';
+    c.lineWidth = 1.5;
+    c.beginPath();
+    c.moveTo(-32, -143);
+    c.lineTo(-19, -147);
+    c.moveTo(20, -147);
+    c.lineTo(31, -143);
+    c.stroke();
+  }
+
+  private currentPalette(): Palette {
+    if (this.activeTool === 'fire' && this.progress.stage === 4) {
+      return {
+        light: '#76717f',
+        main: '#45414e',
+        dark: '#292730',
+        seam: '#a197ad',
+        inner: '#88818e',
+      };
+    }
+    return palettes[this.style];
+  }
+
   private plushGradient(x: number, y: number, radius: number) {
-    const p = palettes[this.style];
+    const p = this.currentPalette();
     const gradient = this.ctx.createRadialGradient(
       x - radius * 0.5,
       y - radius * 0.7,
@@ -299,23 +819,29 @@ export class DollEngine {
 
   private drawDoll() {
     const c = this.ctx;
-    const p = palettes[this.style];
+    const p = this.currentPalette();
+    const frozen = this.activeTool === 'ice' && this.progress.stage > 0;
+    const charcoal = this.activeTool === 'fire' && this.progress.stage === 4;
     c.lineCap = 'round';
     c.lineJoin = 'round';
 
     // Back limbs, each padded separately so their seams catch the light.
-    this.ellipse(-97, 39, 29, 63, this.plushGradient(-100, 20, 59), 0.55, p.seam + '45');
-    this.ellipse(97, 39, 29, 63, this.plushGradient(95, 20, 59), -0.55, p.seam + '45');
+    if (!frozen) {
+      this.ellipse(-97, 39, 29, 63, this.plushGradient(-100, 20, 59), 0.55, p.seam + '45');
+      this.ellipse(97, 39, 29, 63, this.plushGradient(95, 20, 59), -0.55, p.seam + '45');
+    }
     this.ellipse(-48, 163, 40, 34, this.plushGradient(-48, 150, 45), -0.14, p.seam + '45');
     this.ellipse(48, 163, 40, 34, this.plushGradient(48, 150, 45), 0.14, p.seam + '45');
     c.save();
     c.strokeStyle = p.seam + '66';
     c.lineWidth = 1.6;
     for (const direction of [-1, 1]) {
-      c.beginPath();
-      c.moveTo(direction * 104, 55);
-      c.quadraticCurveTo(direction * 115, 65, direction * 116, 74);
-      c.stroke();
+      if (!frozen) {
+        c.beginPath();
+        c.moveTo(direction * 104, 55);
+        c.quadraticCurveTo(direction * 115, 65, direction * 116, 74);
+        c.stroke();
+      }
       c.beginPath();
       c.moveTo(direction * 42, 178);
       c.lineTo(direction * 44, 186);
@@ -362,6 +888,21 @@ export class DollEngine {
     c.quadraticCurveTo(-8, 33, 0, 48);
     c.stroke();
     c.restore();
+
+    if (frozen) {
+      this.ellipse(-24, 30, 21, 63, this.plushGradient(-28, 20, 62), -1.08, p.seam + '66');
+      this.ellipse(25, 48, 21, 63, this.plushGradient(22, 35, 62), 1.08, p.seam + '66');
+      this.ellipse(62, 28, 22, 20, this.plushGradient(55, 20, 30));
+      this.ellipse(-60, 62, 22, 20, this.plushGradient(-62, 50, 30));
+      c.strokeStyle = p.seam + '77';
+      c.lineWidth = 1.5;
+      c.beginPath();
+      c.moveTo(-58, 59);
+      c.lineTo(-49, 65);
+      c.moveTo(55, 23);
+      c.lineTo(64, 28);
+      c.stroke();
+    }
 
     // A tiny woven side label and embroidered heart patch.
     c.save();
@@ -427,8 +968,8 @@ export class DollEngine {
     c.restore();
 
     const faceGradient = c.createLinearGradient(-36, -167, 35, -55);
-    faceGradient.addColorStop(0, '#fff8ec');
-    faceGradient.addColorStop(1, '#f4e3ce');
+    faceGradient.addColorStop(0, charcoal ? '#4e4757' : '#fff8ec');
+    faceGradient.addColorStop(1, charcoal ? '#322e3b' : '#f4e3ce');
     this.ellipse(0, -111, 65, 59, faceGradient);
     if (this.face && this.face.width > 0 && this.face.height > 0) {
       c.save();
@@ -447,15 +988,20 @@ export class DollEngine {
         126,
         126,
       );
+      if (charcoal) {
+        c.fillStyle = '#24212bd9';
+        c.fillRect(-65, -176, 130, 130);
+      }
       c.restore();
-      c.strokeStyle = '#fffaf0';
+      c.strokeStyle = charcoal ? '#8c829c' : '#fffaf0';
       c.lineWidth = 3;
       c.beginPath();
       c.ellipse(0, -111, 63, 57, 0, 0, Math.PI * 2);
       c.stroke();
     } else {
-      this.drawFace();
+      if (!charcoal) this.drawFace();
     }
+    if (charcoal) this.drawCharcoalFace();
 
     // Light on the plush fibers, kept well clear of the face.
     c.strokeStyle = '#ffffff57';

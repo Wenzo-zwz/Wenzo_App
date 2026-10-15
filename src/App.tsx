@@ -24,6 +24,8 @@ import { DollEngine } from './dollEngine';
 import type { DollStyle, ToolId } from './dollEngine';
 import { createPhotoFace, downloadCanvas } from './photo';
 import type { PhotoFace } from './photo';
+import { getToolProgress, STAGE_THRESHOLDS, TOOL_STAGES } from './progression';
+import type { ToolProgress } from './progression';
 
 const TOOLS: {
   id: ToolId;
@@ -458,6 +460,75 @@ function PhotoModal({
   );
 }
 
+function EvolutionPanel({
+  progress,
+  name,
+  color,
+  onRestore,
+}: {
+  progress: ToolProgress;
+  name: string;
+  color: string;
+  onRestore: () => void;
+}) {
+  return (
+    <section
+      className="evolution-panel"
+      aria-label="布偶变化进度"
+      style={{ '--evolution-color': color } as React.CSSProperties}
+    >
+      <div className="evolution-heading">
+        <div>
+          <span className="evolution-badge">
+            {progress.stage ? `LV.0${progress.stage}` : 'START'}
+          </span>
+          <strong data-testid="evolution-stage" aria-live="polite">
+            {progress.stage ? progress.label : `${name} · 越玩越有戏`}
+          </strong>
+        </div>
+        <button
+          className="restore-doll"
+          onClick={onRestore}
+          title="恢复全部工具的外观与阶段，保留本次释放次数、照片和配色"
+        >
+          <RotateCcw size={12} /> 恢复布偶
+        </button>
+      </div>
+      <div
+        className="evolution-track"
+        role="progressbar"
+        aria-label="当前工具变化进度"
+        aria-valuemin={0}
+        aria-valuemax={18}
+        aria-valuenow={Math.min(18, progress.count)}
+        aria-valuetext={`${progress.count} 次，第 ${progress.stage} 阶段，${progress.label}`}
+      >
+        <span style={{ width: `${progress.ratio * 100}%` }} />
+        {STAGE_THRESHOLDS.map((value, index) => (
+          <i
+            key={value}
+            className={progress.count >= value ? 'reached' : ''}
+            style={{ left: `${(value / 18) * 100}%` }}
+          >
+            <span>{TOOL_STAGES[progress.tool][index]}</span>
+          </i>
+        ))}
+      </div>
+      <div className="evolution-caption">
+        <span>
+          {progress.nextAt === null
+            ? '完整形态已解锁，再点也能继续玩'
+            : `再点 ${progress.remaining} 次，${progress.nextLabel}`}
+        </span>
+        <span>
+          <b data-testid="tool-hit-count">{progress.count}</b> 次{' '}
+          <span className="progress-memory">· 每种工具分别累计</span>
+        </span>
+      </div>
+    </section>
+  );
+}
+
 function App() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
@@ -479,6 +550,7 @@ function App() {
   const [name, setName] = useState('烦恼小怪兽');
   const [sound, setSound] = useState(false);
   const [total, setTotal] = useState(0);
+  const [toolCounts, setToolCounts] = useState<Partial<Record<ToolId, number>>>({});
   const [combo, setCombo] = useState(0);
   const [best, setBest] = useState(0);
   const [relief, setRelief] = useState(24);
@@ -489,6 +561,7 @@ function App() {
   const [breathTime, setBreathTime] = useState(0);
   const [toast, setToast] = useState('');
   const selected = TOOLS.find((item) => item.id === tool)!;
+  const progress = getToolProgress(tool, toolCounts[tool] ?? 0);
   const challengeRunning = challenge !== null;
   const closeModal = useCallback(() => setModal(null), []);
 
@@ -513,6 +586,9 @@ function App() {
   useEffect(() => {
     engineRef.current?.setFace(face);
   }, [face]);
+  useEffect(() => {
+    engineRef.current?.setActiveTool(tool);
+  }, [tool]);
   useEffect(() => {
     const interval = setInterval(() => {
       setSeconds(Math.floor((Date.now() - sessionStartedAt.current) / 1000));
@@ -617,7 +693,13 @@ function App() {
       Math.min(100, v + (selected.category === 'soft' ? 2.6 : 0.8 + intensity / 80)),
     );
     if (challenge !== null) setChallengeHits((v) => v + 1);
-    engineRef.current?.hit(tool, intensity, x, y);
+    const result = engineRef.current?.hit(tool, intensity, x, y);
+    if (result) {
+      setToolCounts((previous) => ({ ...previous, [tool]: result.count }));
+      if (result.stage >= 2 && result.stage > getToolProgress(tool, result.count - 1).stage) {
+        notify(`${result.label}！第 ${result.stage} 阶段解锁。`);
+      }
+    }
     playSound(tool);
   };
   currentHit.current = hit;
@@ -625,6 +707,7 @@ function App() {
   const reset = () => {
     stopHold();
     engineRef.current?.reset();
+    setToolCounts({});
     setTotal(0);
     setBest(0);
     setCombo(0);
@@ -637,6 +720,13 @@ function App() {
     setChallengeHits(0);
     lastHit.current = 0;
     notify('新的一局，把不开心都放下。');
+  };
+
+  const restoreDoll = (announce = true) => {
+    stopHold();
+    engineRef.current?.restore();
+    setToolCounts({});
+    if (announce) notify('布偶又变回软乎乎的啦。本次释放记录还在，继续玩！');
   };
 
   const saveReport = () => {
@@ -822,7 +912,7 @@ function App() {
             </div>
           </aside>
           <section className="play-column">
-            <div className="play-stage" ref={stageRef}>
+            <div className={`play-stage evolution-${tool} phase-${progress.stage}`} ref={stageRef}>
               <div className="stage-top">
                 <span className="stage-pill">
                   <span className="status-dot" /> {face ? '专属照片布偶' : '软乎乎的陪伴'}
@@ -855,6 +945,8 @@ function App() {
                   role="button"
                   tabIndex={0}
                   aria-label={`点击布偶，使用${selected.name}`}
+                  data-evolution-tool={tool}
+                  data-evolution-stage={progress.stage}
                   onContextMenu={(e) => e.preventDefault()}
                   onPointerDown={(e) => {
                     if (e.button !== 0) return;
@@ -906,6 +998,12 @@ function App() {
                 </span>
               </div>
             </div>
+            <EvolutionPanel
+              progress={progress}
+              name={selected.name}
+              color={selected.color}
+              onRestore={() => restoreDoll()}
+            />
             <div className="doll-customize">
               <div className="doll-colors" role="group" aria-label="布偶颜色">
                 <span>换个心情</span>
@@ -933,10 +1031,11 @@ function App() {
                     onClick={() => {
                       setFace(null);
                       setName('烦恼小怪兽');
+                      restoreDoll(false);
                       notify('已换回原来的小怪兽，照片已从布偶移除。');
                     }}
                   >
-                    还原布偶
+                    移除照片
                   </button>
                 )}
               </div>
@@ -1084,6 +1183,7 @@ function App() {
           onApply={(value, nickname) => {
             setFace(value);
             setName(nickname);
+            restoreDoll(false);
             closeModal();
             notify('专属布偶就位！坏心情，现在可以交给它了。');
           }}
@@ -1107,7 +1207,8 @@ function App() {
               <span>02</span>
               <p>
                 <strong>用你的方式放松</strong>
-                选择工具、调整力度，点击或长按布偶。键盘空格与回车也能互动。
+                选择工具、调整力度，点击或长按布偶。每种工具在第 1、5、10、18
+                次升级形态，切换工具保留进度，点击“恢复布偶”可以重新体验。键盘空格与回车也能互动。
               </p>
             </div>
             <div>

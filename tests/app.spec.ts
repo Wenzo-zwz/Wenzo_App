@@ -218,9 +218,9 @@ test('a local photo can be cropped, named and applied without outgoing requests'
   await doll(page).click();
   await expect(page.getByTestId('hit-count')).toHaveText('01');
   expect(outgoing, 'Photo selection and processing should not make HTTP requests').toEqual([]);
-  await page.getByRole('button', { name: '还原布偶', exact: true }).click();
+  await page.getByRole('button', { name: '移除照片', exact: true }).click();
   await expect(page.getByText('烦恼小怪兽', { exact: true })).toBeVisible();
-  await expect(page.getByRole('button', { name: '还原布偶', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: '移除照片', exact: true })).toHaveCount(0);
 });
 
 test('invalid image contents show a useful error and cannot be applied', async ({ page }) => {
